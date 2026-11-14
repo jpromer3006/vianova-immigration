@@ -1,0 +1,90 @@
+{
+  "_meta": {
+    "description": "Public entity resolver rules for ViaNova Legal OS. Ordered most-specific first.",
+    "needs_verification": true,
+    "reviewed_by": null,
+    "source_citation": "Public entity names from NY Public Authorities Law and NYC Charter (public sources)",
+    "source_url": "https://www.nysenate.gov/legislation/laws/PBA"
+  },
+  "non_mta_guards": [
+    "amtrak", "nj transit", "new jersey transit", "path train", "path ",
+    "gas station", "police station", "fire station", "personal trainer",
+    "train station of", "freight train", "cargo train"
+  ],
+  "nyc_location_markers": [
+    "manhattan", "brooklyn", "queens", "bronx", "staten island",
+    "new york city", "nyc", "harlem", "times square", "midtown",
+    "downtown", "uptown", "east village", "west village", "soho",
+    "tribeca", "williamsburg", "bushwick", "astoria", "flushing",
+    "jamaica", "bed-stuy", "bed stuy", "crown heights", "flatbush",
+    "bay ridge", "sunset park", "coney island", "brighton beach",
+    "the bronx", "morrisania", "fordham", "riverdale", "hunts point",
+    "jackson heights", "corona", "long island city", "lic",
+    "st. george", "tottenville"
+  ],
+  "public_location_phrases": [
+    "pothole", "sidewalk", "crosswalk", "roadway", "city street",
+    "park", "playground", "public school", "city road", "street",
+    "intersection", "curb", "median", "bike lane", "bus stop"
+  ],
+  "entities": [
+    {
+      "name": "Long Island Rail Road",
+      "patterns": ["\\blirr\\b", "\\blong island rail\\s*road\\b", "\\blong island railroad\\b"],
+      "needs_verification": true,
+      "reviewed_by": null
+    },
+    {
+      "name": "Metro-North Commuter Railroad",
+      "patterns": ["\\bmetro[- ]?north\\b", "\\bmnr\\b"],
+      "needs_verification": true,
+      "reviewed_by": null
+    },
+    {
+      "name": "Staten Island Rapid Transit Operating Authority",
+      "patterns": ["\\bstaten island railway\\b", "\\bsirtoa\\b", "\\bsir train\\b"],
+      "needs_verification": true,
+      "reviewed_by": null
+    },
+    {
+      "name": "MTA Bus Company",
+      "patterns": ["\\bmta bus\\b", "\\bexpress bus\\b"],
+      "needs_verification": true,
+      "reviewed_by": null
+    },
+    {
+      "name": "New York City Transit Authority",
+      "patterns": [
+        "\\bsubway\\b", "\\bnyct\\b", "\\bmta subway\\b",
+        "\\bcity bus\\b", "\\bnyct bus\\b",
+        "\\bthe [a-z] train\\b", "\\b[1-7] train\\b",
+        "\\bturnstile\\b"
+      ],
+      "needs_verification": true,
+      "reviewed_by": null
+    },
+    {
+      "name": "City of New York",
+      "patterns": [
+        "\\bcity of new york\\b",
+        "\\bnew york city\\b.*\\b(?:pothole|sidewalk|crosswalk|roadway|park|playground|school|street|curb)\\b",
+        "\\bthe city\\b.*\\b(?:pothole|sidewalk|crosswalk|roadway|park|playground|school|street|never fixed)\\b"
+      ],
+      "match_mode": "location_plus_public_place",
+      "needs_verification": true,
+      "reviewed_by": null
+    },
+    {
+      "name": "New York City Housing Authority",
+      "patterns": ["\\bnycha\\b", "\\bpublic housing\\b.*\\b(?:nyc|manhattan|brooklyn|queens|bronx|staten island)\\b"],
+      "needs_verification": true,
+      "reviewed_by": null
+    },
+    {
+      "name": "State of New York",
+      "patterns": ["\\bstate highway\\b", "\\bstate park\\b.*\\bnew york\\b", "\\bnys thruway\\b"],
+      "needs_verification": true,
+      "reviewed_by": null
+    }
+  ]
+}
