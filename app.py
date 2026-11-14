@@ -9,11 +9,14 @@ Run:  streamlit run app.py
 from __future__ import annotations
 
 import html
+import logging
 import math
 import os
 import time
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger("vianova.app")
 
 import streamlit as st
 
@@ -78,6 +81,7 @@ if "case" not in st.session_state:
     st.session_state.fp_result = None
     st.session_state.fp_survey_step = 0
     st.session_state.fp_answers = {}
+    st.session_state.fp_solution_shown = False
 case: CaseFile = st.session_state.case
 orch: Orchestrator = st.session_state.orch
 fp: FlashpointClient = st.session_state.setdefault("fp", FlashpointClient())
@@ -281,10 +285,6 @@ if not st.session_state.consent_given:
     st.stop()
 
 
-# ================================================================== FP SURVEY GATE
-if not st.session_state.get("fp_survey_done", False):
-    _render_fp_survey_phase()
-    st.stop()
 
 
 # ================================================================== FLASHPOINT PRE-SURVEY PHASE
@@ -370,6 +370,236 @@ def _render_fp_survey_phase() -> None:
             wfm.log_event(case.workflow, "Flashpoint", f"Probe list: {probe_text}")
 
         st.rerun()
+
+
+# ================================================================== FP SURVEY GATE
+if not st.session_state.get("fp_survey_done", False):
+    _render_fp_survey_phase()
+    st.stop()
+
+
+# ================================================================== SOLUTION SCREEN
+_GOV_RESOURCES = [
+    ("ActionNYC", "1-800-354-0365",
+     "Free, confidential immigration legal help in NYC. Available in multiple languages.",
+     "https://www1.nyc.gov/site/immigrants/help/legal-services/actionnyc.page"),
+    ("ILRC — Immigrant Legal Resource Center", "ilrc.org",
+     "Know-your-rights guides, referral directory, and self-help resources.",
+     "https://www.ilrc.org/"),
+    ("USCIS — Check Case Status", "uscis.gov",
+     "Track the status of a pending immigration application.",
+     "https://egov.uscis.gov/casestatus/landing.do"),
+    ("EOIR — Immigration Court", "justice.gov/eoir",
+     "Find your court date and hearing information.",
+     "https://acis.eoir.justice.gov/en/"),
+    ("NYC Office of Immigrant Affairs", "nyc.gov/immigrants",
+     "City resources, ID programs, and legal aid referrals.",
+     "https://www1.nyc.gov/site/immigrants/index.page"),
+]
+
+_SOLUTION_SYS = """You are ViaNova, an immigration legal information assistant.
+You have just received a Flashpoint pre-survey of an immigrant seeking help.
+Your job is to produce TWO short sections — no more, no less:
+
+1. SURVEY SUMMARY (3-5 sentences): What the survey revealed about this person's
+   situation and needs. Be warm, specific, and plain-language. Note what was
+   clearly stated vs. what was avoided. Do not give legal advice.
+
+2. RELEVANT CASE LAW & RULES (3-5 bullet points): The most relevant recent
+   immigration case law, statutes, or regulatory rules that apply to what this
+   person described. Use plain language. Each bullet: rule name + one sentence
+   on what it means for someone in this situation. Cite official sources.
+
+Tone: empathetic, clear, non-alarmist. Never speculate about outcomes.
+End with: "Legal information only — not legal advice."
+"""
+
+
+def _generate_solution(result: FPResult, answers: dict, urgent: bool) -> str:
+    """Call Claude to generate survey summary + case law. Returns text or fallback."""
+    key = os.getenv("FLASHPOINT_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    if not key or _anthropic_mod is None:
+        return result.summary
+    try:
+        base_url = os.getenv("FLASHPOINT_BASE_URL") if os.getenv("FLASHPOINT_API_KEY") else None
+        kwargs: dict = {"api_key": key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        client = _anthropic_mod.Anthropic(**kwargs)
+        q_map = {q["id"]: q["text_en"] for q in FP_QUESTIONS}
+        answered = "\n".join(
+            f"Q: {q_map[qid]}\nA: {ans or '(no answer)'}"
+            for qid, ans in answers.items()
+            if qid in q_map
+        )
+        scored = "\n".join(
+            f"{q['text_en'][:60]} → {result.scores.get(q['id'], '?')}"
+            for q in FP_QUESTIONS
+        )
+        prompt = (
+            f"Pre-survey answers:\n{answered}\n\n"
+            f"Flashpoint scoring:\n{scored}\n\n"
+            f"Probe list topics: {', '.join(q['signal'] for q in FP_QUESTIONS if result.scores.get(q['id']) in ('THIN','AVOIDED'))}\n"
+            f"Urgency flag: {'YES — court/legal action mentioned' if urgent else 'No immediate urgency detected'}\n\n"
+            "Now generate the SURVEY SUMMARY and RELEVANT CASE LAW & RULES sections."
+        )
+        resp = client.messages.create(
+            model=MODEL, max_tokens=800, system=_SOLUTION_SYS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(b.text for b in resp.content if b.type == "text").strip()
+    except Exception as exc:
+        logger.warning("solution generation failed: %s", exc)
+        return result.summary if result else ""
+
+
+def _render_solution_screen() -> None:
+    """Solution screen: Flashpoint survey summary + case law + .gov resources.
+
+    Shown immediately after the FP survey. No additional questions.
+    """
+    result: FPResult = st.session_state.get("fp_result")
+    answers: dict    = st.session_state.get("fp_answers", {})
+
+    court_ans = answers.get("q2", "").lower()
+    urgent = any(w in court_ans for w in
+                 ["court", "letter", "notice", "detained", "deported", "removal",
+                  "judge", "hearing", "appear", "ice", "uscis", "i-"])
+
+    # Generate AI summary once and cache it
+    if "fp_solution_text" not in st.session_state:
+        with st.spinner("ViaNova — analysing your answers and finding relevant law…"):
+            st.session_state.fp_solution_text = _generate_solution(result, answers, urgent)
+
+    solution_text: str = st.session_state.get("fp_solution_text", "")
+
+    st.markdown(CSS, unsafe_allow_html=True)
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="max-width:1100px; margin:24px auto 16px; display:flex;
+  align-items:baseline; gap:18px; flex-wrap:wrap;">
+  <div style="font-family:'Orbitron',sans-serif; font-size:24px; letter-spacing:.3em;
+    color:#29e6ff; text-shadow:0 0 14px rgba(41,230,255,.7);">ViaNova</div>
+  <div style="font-size:11px; letter-spacing:.25em; color:#5f8ea3;">
+    SURVEY COMPLETE — YOUR RESULTS &amp; NEXT STEPS</div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Urgent banner ────────────────────────────────────────────────────────
+    if urgent:
+        st.markdown("""
+<div style="max-width:1100px; margin:0 auto 14px; padding:12px 18px;
+  border:2px solid #ff4d6d; background:rgba(255,77,109,.10); border-radius:4px;">
+  <span style="font-family:'Orbitron',sans-serif; font-size:12px; color:#ff4d6d;
+    letter-spacing:.2em;">URGENT — LEGAL ACTION DETECTED &nbsp;</span>
+  <span style="font-size:13px; color:#ffd3db;">
+    Call <b style="color:#ff4d6d;">ActionNYC: 1-800-354-0365</b> — free, confidential, multilingual.
+    Do not miss any court date.
+  </span>
+</div>""", unsafe_allow_html=True)
+
+    # ── 3-column layout ──────────────────────────────────────────────────────
+    col_survey, col_law, col_gov = st.columns([1.1, 1.3, 0.9], gap="medium")
+
+    # LEFT — Flashpoint survey analysis
+    with col_survey:
+        if result:
+            score_rows = ""
+            for q in FP_QUESTIONS:
+                sc = result.scores.get(q["id"], "")
+                c  = {"CLEAR": "#3dffb5", "THIN": "#ffb347", "AVOIDED": "#ff4d6d"}.get(sc, "#5f8ea3")
+                score_rows += (
+                    f'<div style="display:flex; gap:8px; padding:6px 0; '
+                    f'border-bottom:1px dashed rgba(41,230,255,.10);">'
+                    f'<span style="color:{c}; font-size:9px; letter-spacing:.15em; '
+                    f'min-width:56px; padding-top:2px;">{esc(sc)}</span>'
+                    f'<span style="font-size:12px; color:#c8ecff; line-height:1.4;">'
+                    f'{esc(q["text_en"])}</span></div>'
+                )
+            st.markdown(f"""
+<div class="panel">
+  <div class="ptitle">FLASHPOINT // SURVEY ANALYSIS</div>
+  {score_rows}
+</div>""", unsafe_allow_html=True)
+
+        if result and result.probe_list:
+            probe_rows = "".join(
+                f'<div style="padding:6px 0; border-bottom:1px dashed rgba(255,179,71,.15); '
+                f'font-size:12px; color:#ffe6c2; line-height:1.5;">'
+                f'<span style="color:#ffb347;">→ </span>{esc(p)}</div>'
+                for p in result.probe_list[:4]
+            )
+            st.markdown(f"""
+<div class="panel" style="border-color:rgba(255,179,71,.4);">
+  <div class="ptitle" style="color:#ffb347;">ATTORNEY PROBE LIST</div>
+  <div style="font-size:10px; color:#5f8ea3; margin-bottom:8px;">
+    Flagged for human follow-up only. ViaNova does not act on these.
+  </div>
+  {probe_rows}
+</div>""", unsafe_allow_html=True)
+
+    # CENTRE — AI summary + case law
+    with col_law:
+        if solution_text:
+            # Split into paragraphs and render nicely
+            safe_text = solution_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            paragraphs = [p.strip() for p in safe_text.split("\n") if p.strip()]
+            body_html = "".join(
+                f'<div style="font-size:13px; line-height:1.65; color:#d8f6ff; '
+                f'margin-bottom:10px; white-space:pre-wrap;">{para}</div>'
+                for para in paragraphs
+            )
+            st.markdown(f"""
+<div class="panel" style="border-color:rgba(41,230,255,.4);">
+  <div class="ptitle">ViaNova // ANALYSIS &amp; CASE LAW</div>
+  {body_html}
+</div>""", unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="panel"><div class="ptitle">ViaNova // ANALYSIS</div>'
+                        '<div class="log">Set FLASHPOINT_API_KEY or ANTHROPIC_API_KEY to generate analysis.</div>'
+                        '</div>', unsafe_allow_html=True)
+
+    # RIGHT — .gov resources
+    with col_gov:
+        ref_html = ""
+        for name, contact, desc, url in _GOV_RESOURCES:
+            border = "rgba(255,77,109,.5)" if ("ActionNYC" in name and urgent) else "rgba(41,230,255,.22)"
+            tc     = "#ff4d6d" if ("ActionNYC" in name and urgent) else "#29e6ff"
+            ref_html += (
+                f'<div style="padding:10px 12px; margin-bottom:8px; '
+                f'border:1px solid {border}; background:rgba(6,28,44,.5); border-radius:3px;">'
+                f'<div style="font-family:\'Orbitron\',sans-serif; font-size:10px; '
+                f'color:{tc}; letter-spacing:.1em; margin-bottom:3px;">{esc(name)}</div>'
+                f'<div style="font-size:12px; color:#e9fbff; margin-bottom:3px;">{esc(contact)}</div>'
+                f'<div style="font-size:11px; color:#5f8ea3; margin-bottom:5px; line-height:1.4;">{esc(desc)}</div>'
+                f'<a href="{esc(url)}" target="_blank" '
+                f'style="font-size:10px; color:{tc}; text-decoration:none;">{esc(url)} ↗</a></div>'
+            )
+        st.markdown(f"""
+<div class="panel">
+  <div class="ptitle">FREE HELP // .GOV RESOURCES</div>
+  {ref_html}
+</div>""", unsafe_allow_html=True)
+
+    # ── Footer ───────────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="text-align:center; font-size:11px; color:#ffb347; margin:10px 0 4px; letter-spacing:.06em;">
+  Legal information only — not legal advice.
+  Confirm all deadlines and filings with a licensed immigration attorney or DOJ accredited representative.
+</div>""", unsafe_allow_html=True)
+
+    st.write("")
+    _c1, _c2, _c3 = st.columns([1, 2, 1])
+    with _c2:
+        if st.button("CONTINUE — SPEAK WITH ViaNova →", use_container_width=True):
+            st.session_state.fp_solution_shown = True
+            st.rerun()
+
+
+# Solution screen gate — show after FP survey, before full intake
+if not st.session_state.get("fp_solution_shown", False):
+    _render_solution_screen()
+    st.stop()
 
 
 # ================================================================== VOICE MODE (overlay on dashboard)
@@ -1292,101 +1522,48 @@ with center:
                 _vianova_speak(_last_j, already_local=bool(_lmv.get("text_local")))
                 st.session_state[_spoken_key] = True
 
-# ------------------------------------------------------------------ RIGHT: flashpoint + sources + log
+# ------------------------------------------------------------------ RIGHT: probe list + referrals
 with right:
-    _spec = lang_spec(case.language)
-    _comm = _spec.get("community")
-    _zip = ""
-    import re as _re
-    _m = _re.search(r"\b1\d{4}\b", case.facts.get("where", ""))
-    if _m:
-        _zip = _m.group(0)
-    _descriptor = None
-    if _comm:
-        _loc = f"NYC ZIP {_zip}" if _zip else _comm["location"]
-        _descriptor = f"{_comm['label']} · {_loc}"
-    if not fp.live:
-        if st.button("CONNECT FLASHPOINT (SIGN IN)", help="Opens your browser. Sign in with the account you used at app.flashpoint.ai."):
-            from core.flashpoint import oauth_login
-            with st.spinner("Waiting for you to sign in to Flashpoint in the browser…"):
-                try:
-                    oauth_login()
-                    st.session_state.fp = FlashpointClient()
-                    orch._log("FlashpointAgent", "signed in to Flashpoint (OAuth)")
-                except Exception as e:
-                    st.error(f"Flashpoint sign in failed: {e}")
-            st.rerun()
-    if st.button("FLASHPOINT // COMMUNITY LENS", disabled=_descriptor is None,
-                 help="Live Flashpoint demographics for this language community. "
-                      "Sends only the anonymous community description, never the person's story."):
-        _q = (f"For {_comm['label']}: what share of residents are foreign born, speak "
-              f"{case.language.split()[-1]} at home, and speak English less than very well? "
-              "What does that imply for plain language and interpreter needs?")
-        with st.spinner("Flashpoint.AI demographics (x402)"):
-            _r = fp.demographics(_zip or _comm["location"], question=_q,
-                                 audience=f"{case.language} speaking immigrants")
-        _summary = _r.text
-        if _r.data and isinstance(_r.data, dict):
-            _summary = (_r.data.get("insights") or _r.data.get("summary") or _r.data.get("ai_insights")
-                        or _json.dumps(_r.data, ensure_ascii=False)[:900])
-            if isinstance(_summary, list):
-                _summary = "\n".join(str(x) for x in _summary)
-        st.session_state.fp_lens = {"source": _r.source, "summary": str(_summary)[:900], "ok": _r.ok}
-        case.flashpoint = {"descriptor": _descriptor, "lens": st.session_state.fp_lens,
-                           "cost": _r.cost_usdc}
-        orch._log("FlashpointAgent", f"demographics {_r.source} ok={_r.ok} ({_r.seconds:.1f}s)")
-        case.save()
-        st.rerun()
     _fp_result: FPResult | None = st.session_state.get("fp_result")
-    _fp_calibration = _calibration()
-    if _fp_result and _fp_result.probe_list:
-        _probe_txt = "ATTORNEY PROBES — " + " | ".join(_fp_result.probe_list[:5])
-        _fp_calibration = (_probe_txt + "\n\n" + _fp_calibration).strip()
-    st.markdown(render_flashpoint_panel(
-        {"live": fp.live, "address": fp.address or (fp.mode if fp.live else None),
-         "spent": fp.spent_usdc()},
-        st.session_state.get("fp_lens"), _fp_calibration, _descriptor, fp.log), unsafe_allow_html=True)
-    _fl = os.getenv("FLASHLIGHT_URL", "http://localhost:3000")
-    st.markdown(f'<div class="panel"><div class="ptitle">COMMUNITY RESEARCH // FLASHLIGHT</div>'
-                f'<div class="log">Team research engine (Khalefa): measures the say vs do gap for a whole '
-                f'community and buys Flashpoint evidence only when it narrows the uncertainty enough per dollar.</div>'
-                f'<div class="rule"><a href="{esc(_fl)}" target="_blank">Open Flashlight dashboard ↗</a> '
-                f'<span class="log">(run <code>npm run dev</code> in the flashlight folder)</span></div></div>',
-                unsafe_allow_html=True)
-    _gm = _gap_map()
-    if _gm:
-        _rows = ""
-        for g in _gm:
-            def _bar(v, c):
-                try:
-                    v = float(str(v).strip("%"))
-                except ValueError:
-                    v = 0
-                return (f'<div style="height:6px;background:rgba(41,230,255,.08);margin:2px 0">'
-                        f'<i style="display:block;height:6px;width:{min(v,100):.0f}%;background:{c}"></i></div>')
-            _rows += (f'<div class="fact" style="display:block"><b>{esc(g.get("topic","")).upper()}</b>'
-                      f'<div class="log">SAY {esc(g.get("say_pct",""))}</div>{_bar(g.get("say_pct",0),"#29e6ff")}'
-                      f'<div class="log">BELIEVE {esc(g.get("believe_pct",""))}</div>{_bar(g.get("believe_pct",0),"#ffb347")}'
-                      f'<div class="log">DO {esc(g.get("do_pct",""))}</div>{_bar(g.get("do_pct",0),"#ff4d6d")}'
-                      f'<div style="font-size:12px;color:#d8f6ff">{esc(g.get("gap",""))}</div></div>')
-        st.markdown(f'<div class="panel"><div class="ptitle">SAY · BELIEVE · DO // {esc(case.language).upper()} COMMUNITY '
-                    f'<span>FLASHPOINT PANEL</span></div>{_rows}</div>', unsafe_allow_html=True)
 
+    # Flashpoint survey summary (compact)
+    if _fp_result:
+        _score_rows = ""
+        for _q in FP_QUESTIONS:
+            _sc = _fp_result.scores.get(_q["id"], "")
+            _sc_color = {"CLEAR": "#3dffb5", "THIN": "#ffb347", "AVOIDED": "#ff4d6d"}.get(_sc, "#5f8ea3")
+            _score_rows += (
+                f'<div class="fp-k" style="color:{_sc_color}">{_sc}</div>'
+                f'<div class="fp-v" style="font-size:11px; margin-bottom:6px;">'
+                f'{esc(_q["text_en"][:60])}{"…" if len(_q["text_en"]) > 60 else ""}</div>'
+            )
+        st.markdown(f'{IMM_CSS}<div class="panel"><div class="ptitle">FLASHPOINT // SURVEY RESULTS</div>'
+                    f'{_score_rows}</div>', unsafe_allow_html=True)
+
+    # Attorney probe list
+    if _fp_result and _fp_result.probe_list:
+        _p_rows = "".join(
+            f'<div style="padding:6px 0; border-bottom:1px dashed rgba(255,179,71,.18); '
+            f'font-size:12px; color:#ffe6c2; line-height:1.5;">'
+            f'<span style="color:#ffb347">→ </span>{esc(p)}</div>'
+            for p in _fp_result.probe_list[:4]
+        )
+        st.markdown(f'<div class="panel" style="border-color:rgba(255,179,71,.4);">'
+                    f'<div class="ptitle" style="color:#ffb347;">ATTORNEY PROBES</div>'
+                    f'{_p_rows}'
+                    f'<div class="fp-k" style="margin-top:8px;">AI does not act on these — attorney review required.</div>'
+                    f'</div>', unsafe_allow_html=True)
+
+    # Sources (compact, only after research)
     all_sources = [s for f in orch.findings for s in f.sources]
     if all_sources:
-        items = ""
-        for s in all_sources[:14]:
-            items += (f'<div class="src"><span class="tier t{s.tier}">T{s.tier} {TIER_LABELS[s.tier]}</span>'
-                      f'<a href="{esc(s.url)}" target="_blank">{esc(s.title or s.domain)}</a>'
-                      f'<div style="color:#5f8ea3">{esc(s.domain)} · {esc(s.agent)}</div></div>')
-    else:
-        items = '<div class="log">Sources appear here after research. Government and court sources rank first.</div>'
-    st.markdown(f'<div class="panel"><div class="ptitle">SOURCE AUTHORITY <span>{len(all_sources)}</span></div>{items}</div>',
-                unsafe_allow_html=True)
-
-    log = "".join(f'<div>{e.t} <b>{esc(e.agent)}</b> {esc(e.msg)}</div>' for e in reversed(orch.log[-40:]))
-    st.markdown(f'<div class="panel"><div class="ptitle">AGENT ACTIVITY</div><div class="log">{log}</div></div>',
-                unsafe_allow_html=True)
+        items = "".join(
+            f'<div class="src"><span class="tier t{s.tier}">T{s.tier}</span>'
+            f'<a href="{esc(s.url)}" target="_blank">{esc(s.title or s.domain)}</a></div>'
+            for s in all_sources[:8]
+        )
+        st.markdown(f'<div class="panel"><div class="ptitle">SOURCES <span>{len(all_sources)}</span></div>{items}</div>',
+                    unsafe_allow_html=True)
 
 # ------------------------------------------------------------------ ON THE SPOT SURVEY (security layer)
 if st.session_state.get("survey_open") and not case.stage_report:
